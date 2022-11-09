@@ -493,6 +493,192 @@ int get_line(int sock, char *buf, int size) {
 	return (i);
 }
 
+/**********************************************************************/
+/* Return the informational HTTP headers about a file. */
+/* Parameters: the socket to print the headers on
+ *             the name of the file */
+/**********************************************************************/
+
+// 加入http的headers
+void headers(int client, const char *filename) {
+	char buf[1024];
+	(void) filename; /* could use filename to determine file type */
+
+	strcpy(buf, "HTTP/1.0 200 OK\r\n");
+	send(client, buf, strlen(buf), 0);
+	strcpy(buf, SERVER_STRING);
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "Content-type: text/html\r\n");
+	send(client, buf, strlen(buf), 0);
+	strcpy(buf, "\r\n");
+	send(client, buf, strlen(buf), 0);
+}
+
+/**********************************************************************/
+/* Give a client a 404 not found status message. */
+/**********************************************************************/
+
+//如果资源没有找到得返回给客户端下面的信息
+void not_found(int client) {
+	char buf[1024];
+
+	sprintf(buf, "HTTP/1.0 404 NOT FOUND\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, SERVER_STRING);
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "Content-Type: text/html\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "<HTML><TITLE>Not Found</TITLE>\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "<BODY><P>The server could not fulfill\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "your request because the resource specified\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "is unavailable or nonexistent.\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "</BODY></HTML>\r\n");
+	send(client, buf, strlen(buf), 0);
+}
+
+/**********************************************************************/
+/* Send a regular file to the client.  Use headers, and report
+ * errors to client if they occur.
+ * Parameters: a pointer to a file structure produced from the socket
+ *              file descriptor
+ *             the name of the file to serve */
+/**********************************************************************/
+
+//如果不是CGI文件，直接读取文件返回给请求的http客户端
+void server_file(int client, const char *filename) {
+	FILE *resource = NULL;
+	int numchars = 1;
+	char buf[1024];
+
+	// 默认字符
+	buf[0] = 'A'; buf[1] = '\0';
+	while ((numchars > 0) && strcmp("\n", buf)) { /* read & discard headers */
+		numchars = get_line(client, buf, sizeof(buf));
+	}
+	resource = fopen(filename, "r");
+	if (resource == NULL) {
+		not_found(client);
+	} else {
+		headers(client, filename);
+		cat(client, resource);
+	}
+	fclose(resource);
+}
+
+/**********************************************************************/
+/* This function starts the process of listening for web connections
+ * on a specified port.  If the port is 0, then dynamically allocate a
+ * port and modify the original port variable to reflect the actual
+ * port.
+ * Parameters: pointer to variable containing the port to connect on
+ * Returns: the socket */
+/**********************************************************************/
+int startup(u_short *port) {
+	int httpd = 0;
+	struct sockaddr_in name;
+
+	httpd = socket(PF_INET, SOCK_STREAM, 0);
+	if (httpd == -1) {
+		error_die("socket");
+	}
+	memset(&name, 0, sizeof(name));
+	name.sin_family = AF_INET;
+	name.sin_port = htons(*port);
+	name.sin_addr.s_addr = htonl(INADDR_ANY);
+	// 绑定socket
+	if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0) {
+		error_die("bind");
+	}
+	// 如果端口没有设置，提供个随机端口
+	if (*port == 0) { /* if dynamically allocating a port */
+		socklen_t namelen = sizeof(name);
+		if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1) {
+			error_die("getsockname");
+		}
+		*port = ntohs(name.sin_port);
+	}
+	// 监听
+	if (listen(httpd, 5) < 0) {
+		error_die("listen");
+	}
+	return (httpd);
+}
+
+/**********************************************************************/
+/* Inform the client that the requested web method has not been
+ * implemented.
+ * Parameter: the client socket */
+/**********************************************************************/
+
+//如果方法没有实现，就返回此信息
+void unimplemented(int client) {
+	char buf[1024];
+
+	sprintf(buf, "HTTP/1.0 501 Method Not Implemented\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, SERVER_STRING);
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "Content-Type: text/html\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "<HTML><HEAD><TITLE>Method Not Implemented\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "</TITLE></HEAD>\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "<BODY><P>HTTP request method not supported.\r\n");
+	send(client, buf, strlen(buf), 0);
+	sprintf(buf, "</BODY></HTML>\r\n");
+	send(client, buf, strlen(buf), 0);
+}
+
+/**********************************************************************/
+
+int main(void) {
+	int server_sock = -1;
+	u_short port = 0;
+	int client_sock = -1;
+	struct sockaddr_in client_name;
+
+	// 这边要为socklen_t类型
+	socklen_t client_name_len = sizeof(client_name);
+	pthread_t newthread;
+
+	server_sock = startup(&port);
+	printf("httpd running on port %d\n", port);
+
+	while (1) {
+		// 接受请求，函数原型
+		// #include <sys/types.h>
+		// #include <sys/socket.h>
+		// int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+		client_sock = accept(server_sock, (struct sockaddr *)&client_name, &client_name_len);
+		if (client_sock == -1) {
+			error_die("accept");
+		}
+		/* accept_request(client_sock) */
+
+		// 每次收到请求，创建一个线程来处理接收到的请求
+		// 把client_sock转成地址作为参数传入pthread_create
+		if (pthread_create(&newthread, NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0) {
+			perror("pthread_create");
+		}
+	}
+	close(server_sock);
+
+	return 0;
+}
+
+
+
+
+
 
 
 
